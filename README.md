@@ -14,7 +14,7 @@ A beautiful Electron application that exports Apple Mail emails to PDF format. T
 ## Prerequisites
 
 - macOS (Apple Mail is required)
-- Node.js 16+ and npm
+- Node.js 16+ and npm ([Download Node.js](https://nodejs.org/))
 - Apple Mail app installed and configured with at least one email account
 
 ## Installation
