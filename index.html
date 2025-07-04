@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apple Mail Exporter</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="mui-container">
+        <header class="mui-header">
+            <h1>Apple Mail Exporter</h1>
+            <p>Export your Apple Mail emails to PDF format</p>
+        </header>
+        <main class="mui-main">
+            <div class="mui-left">
+                <div class="mui-card">
+                    <h2><span class="material-icons">account_circle</span> Step 1: Select Mail Account & Folder</h2>
+                    <div class="mui-form-group">
+                        <label for="accountSelect">Mail Account</label>
+                        <select id="accountSelect" class="mui-form-control"></select>
+                    </div>
+                    <div class="mui-form-group">
+                        <label for="folderSelect">Mail Folder</label>
+                        <select id="folderSelect" class="mui-form-control" disabled></select>
+                    </div>
+                    <div class="mui-form-group">
+                        <label for="emailCount">Number of emails to export</label>
+                        <input type="number" id="emailCount" class="mui-form-control" value="10" min="1" max="100">
+                    </div>
+                </div>
+            </div>
+            <div class="mui-right">
+                <div class="mui-card">
+                    <h2><span class="material-icons">folder_open</span> Step 2: Select Output & Export</h2>
+                    <div class="mui-form-group">
+                        <label for="outputPath">Output Directory</label>
+                        <div class="mui-path-display">
+                            <input type="text" id="outputPath" class="mui-form-control" placeholder="No folder selected" readonly>
+                            <button id="selectFolderBtn" class="mui-btn mui-btn-secondary">
+                                <span class="material-icons">folder</span> Browse
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mui-form-group" style="margin-bottom: 10px;">
+                        <button id="exportBtn" class="mui-btn mui-btn-primary" disabled style="width:100%;">
+                            <span class="material-icons">cloud_download</span>
+                            <span class="btn-text">Export to PDF</span>
+                            <span class="btn-loading" style="display: none;">
+                                <div class="mui-spinner"></div>
+                                Exporting...
+                            </span>
+                        </button>
+                    </div>
+                    <div id="progressCard" style="display: none;">
+                        <div class="mui-progress-container">
+                            <div class="mui-progress-bar">
+                                <div id="progressFill" class="mui-progress-fill"></div>
+                            </div>
+                            <div id="progressText" class="mui-progress-text">0%</div>
+                        </div>
+                        <div id="statusText" class="mui-status-text">Preparing export...</div>
+                    </div>
+                    <div id="resultsCard" style="display: none;">
+                        <div id="resultsContent" class="mui-results-content"></div>
+                        <button id="openFolderBtn" class="mui-btn mui-btn-secondary" style="width:100%;margin-top:8px;">
+                            <span class="material-icons">open_in_new</span> Open Output Folder
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="renderer.js"></script>
+</body>
+</html> 
