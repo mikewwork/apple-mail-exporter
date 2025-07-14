@@ -105,7 +105,7 @@ ipcMain.handle('scan-mail-folders', async () => {
 });
 
 // Function to generate CSV from .eml files
-async function generateCSVFromEmails(emailsFolder, csvFilePath) {
+async function generateCSVFromEmails(emailsFolder, csvFilePath, event) {
   try {
     const files = fs.readdirSync(emailsFolder).filter(file => file.endsWith('.eml'));
     
@@ -116,7 +116,27 @@ async function generateCSVFromEmails(emailsFolder, csvFilePath) {
     
     const csvRows = ['Date,Sender Email,Subject,Name,Company,Phone,Domain,Filename,Content'];
     
-    for (const fileName of files) {
+    // Send initial progress update
+    if (event) {
+      event.sender.send('progress-update', 50, `Processing ${files.length} emails...`);
+    }
+    
+    // Calculate batch size for progress updates
+    // For small counts (≤50): update every email
+    // For medium counts (51-500): update every 10 emails
+    // For large counts (>500): update every 50 emails
+    let batchSize;
+    if (files.length <= 50) {
+      batchSize = 1; // Update every email for small counts
+    } else if (files.length <= 500) {
+      batchSize = 10; // Update every 10 emails for medium counts
+    } else {
+      batchSize = 50; // Update every 50 emails for large counts
+    }
+    let lastProgressUpdate = 0;
+    
+    for (let i = 0; i < files.length; i++) {
+      const fileName = files[i];
       const filePath = path.join(emailsFolder, fileName);
       const emailContent = fs.readFileSync(filePath, 'utf8');
       
@@ -135,9 +155,25 @@ async function generateCSVFromEmails(emailsFolder, csvFilePath) {
         emailData.fileName,
         emailData.content
       ].map(field => `"${field.replace(/"/g, '""')}"`).join(','));
+      
+      // Update progress in batches to avoid overwhelming the UI
+      if (event && (i + 1) % batchSize === 0) {
+        const progress = 50 + Math.floor((i + 1) / files.length * 40); // 50-90%
+        const processedCount = Math.min(i + 1, files.length);
+        event.sender.send('progress-update', progress, `Processed ${processedCount} of ${files.length} emails...`);
+        lastProgressUpdate = progress;
+      }
+    }
+    
+    // Send final processing update if we haven't sent one recently
+    if (event && lastProgressUpdate < 90) {
+      event.sender.send('progress-update', 90, `Processed all ${files.length} emails...`);
     }
     
     // Write CSV file
+    if (event) {
+      event.sender.send('progress-update', 90, 'Creating CSV file...');
+    }
     fs.writeFileSync(csvFilePath, csvRows.join('\n'), 'utf8');
     console.log(`CSV file created with ${files.length} email records`);
     
@@ -409,7 +445,7 @@ ipcMain.handle('export-emails', async (event, selectedFolder, outputPath) => {
     // Now process the .eml files to generate CSV
     if (exportedCount > 0) {
       try {
-        await generateCSVFromEmails(emailsFolder, csvFilePath);
+        await generateCSVFromEmails(emailsFolder, csvFilePath, event);
       } catch (csvError) {
         console.error('Error generating CSV:', csvError);
         // Don't fail the entire operation if CSV generation fails

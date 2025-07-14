@@ -142,3 +142,8 @@ function updateProgress(percentage, text) {
     progressFill.style.width = `${percentage}%`;
     progressText.textContent = text;
 }
+
+// Listen for progress updates from main process
+ipcRenderer.on('progress-update', (event, percentage, text) => {
+    updateProgress(percentage, text);
+});

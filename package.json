@@ -1,6 +1,6 @@
 {
   "name": "apple-mail-exporter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Export Apple Mail emails to PDF",
   "main": "main.js",
   "scripts": {
