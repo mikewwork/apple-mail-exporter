@@ -1,32 +1,25 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const fs = require('fs');
 const path = require('path');
-const { exec, execFile } = require('child_process');
-const fs = require('fs-extra');
 const EmlParser = require('eml-parser');
-const { simpleParser } = require('mailparser');
-const createCsvWriter = require('csv-writer').createObjectCsvWriter;
-const puppeteer = require('puppeteer');
+const EmailReplyParser = require('email-reply-parser');
+const emailRegex = require('email-regex-safe');
 
-let mainWindow;
+const execAsync = promisify(exec);
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+  const win = new BrowserWindow({
+    width: 1000,
+    height: 700,
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
-    },
-    icon: path.join(__dirname, 'assets/icon.png'),
-    title: 'Apple Mail Exporter'
+      nodeIntegration: true,
+      contextIsolation: false
+    }
   });
 
-  mainWindow.loadFile('index.html');
-
-  if (process.argv.includes('--dev')) {
-    mainWindow.webContents.openDevTools();
-  }
+  win.loadFile('index.html');
 }
 
 app.whenReady().then(createWindow);
@@ -43,291 +36,396 @@ app.on('activate', () => {
   }
 });
 
-// IPC Handlers
-ipcMain.handle('get-mail-accounts', async () => {
-  try {
-    // AppleScript as array of lines for execFile
-    const scriptLines = [
-      'tell application "Mail"',
-      'set output to ""',
-      'repeat with acc in accounts',
-      'set output to output & "Account: " & (name of acc) & linefeed',
-      'repeat with mbox in mailboxes of acc',
-      'set output to output & "  Folder: " & (name of mbox) & linefeed',
-      'end repeat',
-      'end repeat',
-      'return output',
-      'end tell'
-    ];
-    const args = scriptLines.flatMap(line => ['-e', line]);
-    return new Promise((resolve, reject) => {
-      execFile('osascript', args, (error, stdout, stderr) => {
-        if (error) {
-          console.error('AppleScript error:', error);
-          reject(error);
-          return;
-        }
-        try {
-          const accounts = parseAccountsAndFolders(stdout);
-          resolve(accounts);
-        } catch (parseError) {
-          reject(parseError);
-        }
-      });
-    });
-  } catch (error) {
-    console.error('Error getting mail accounts:', error);
-    throw error;
-  }
-});
-
-function parseAccountsAndFolders(output) {
-  const lines = output.split(/\r?\n/).filter(Boolean);
-  const accounts = [];
-  let currentAccount = null;
-  for (const line of lines) {
-    if (line.startsWith('Account: ')) {
-      if (currentAccount) accounts.push(currentAccount);
-      currentAccount = { name: line.replace('Account: ', '').trim(), folders: [] };
-    } else if (line.startsWith('  Folder: ')) {
-      if (currentAccount) {
-        currentAccount.folders.push({ name: line.replace('  Folder: ', '').trim() });
-      }
-    }
-  }
-  if (currentAccount) accounts.push(currentAccount);
-  return accounts;
-}
-
-ipcMain.handle('select-output-folder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
+// Handle folder selection dialog
+ipcMain.handle('select-folder', async () => {
+  const result = await dialog.showOpenDialog({
     properties: ['openDirectory'],
-    title: 'Select Output Folder for PDF Files'
+    title: 'Select Output Folder'
   });
-
-  console.log('Dialog result:', result);
-
-  if (!result.canceled) {
-    console.log('Selected folder:', result.filePaths[0]);
+  
+  if (!result.canceled && result.filePaths.length > 0) {
     return result.filePaths[0];
   }
   return null;
 });
 
-ipcMain.handle('openFolder', async (event, folderPath) => {
-  const { shell } = require('electron');
-  await shell.openPath(folderPath);
-});
-
-function extractClientName(body) {
-  const signOffs = [
-    'regards,', 'best regards,', 'thanks,', 'thank you,', 'sincerely,', 'cheers,', 'kind regards,'
-  ];
-  const lines = body.split(/\r?\n/).map(line => line.trim());
-  for (let i = 0; i < lines.length; i++) {
-    const lower = lines[i].toLowerCase();
-    if (signOffs.some(sign => lower.startsWith(sign))) {
-      for (let j = i + 1; j < lines.length; j++) {
-        if (lines[j]) return lines[j];
-      }
-    }
-  }
-  return '';
-}
-
-function extractInfoFromEmail(parsed) {
-  const from = parsed.from?.value?.[0]?.address || '';
-  const date = parsed.date || '';
-  const body = parsed.text || '';
-  // Extract base URL (protocol + domain)
-  let website = '';
-  const urlMatch = body.match(/https?:\/\/[^\s"']+/);
-  if (urlMatch) {
-    try {
-      const url = new URL(urlMatch[0]);
-      website = url.origin;
-    } catch {}
-  }
-  const phoneMatch = body.match(/\+?\d[\d\s\-()]{7,}/g);
-  const phone = phoneMatch ? phoneMatch[0] : '';
-  const clientName = extractClientName(body);
-  return { from, date, clientName, website, phone };
-}
-
-function logDebug(msg, outputPath) {
-  const logFile = path.join(outputPath, 'export_debug.log');
-  fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`);
-}
-
-async function emlToPdfWithPuppeteer(emlPath, pdfPath) {
-  const emlContent = await fs.readFile(emlPath, 'utf8');
-  const parsed = await simpleParser(emlContent);
-  // Build HTML for the email
-  const html = `
-    <html><head><meta charset='utf-8'><title>${parsed.subject || ''}</title></head><body>
-    <div style='font-family:sans-serif;'>
-      <h2>${parsed.subject || ''}</h2>
-      <div><b>From:</b> ${parsed.from?.text || ''}</div>
-      <div><b>To:</b> ${parsed.to?.text || ''}</div>
-      <div><b>Date:</b> ${parsed.date || ''}</div>
-      <hr/>
-      <div>${parsed.html || parsed.textAsHtml || `<pre>${parsed.text || ''}</pre>`}</div>
-    </div>
-    </body></html>
-  `;
-  const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
-  const page = await browser.newPage();
-  await page.setContent(html, { waitUntil: 'networkidle0' });
-  await page.pdf({ path: pdfPath, format: 'A4', printBackground: true });
-  await browser.close();
-}
-
-ipcMain.handle('export-emails', async (event, { accountName, folderName, outputPath, emailCount = 10 }) => {
+// Handle scanning mail folders using AppleScript
+ipcMain.handle('scan-mail-folders', async () => {
   try {
-    await fs.ensureDir(outputPath);
-    const pdfFiles = [];
-    const timestampCounts = {};
-    const clientInfoRows = [];
-    logDebug('Starting export-emails', outputPath);
-    // 1. Get all message count in folder
-    const getCountScriptLines = [
-      `tell application "Mail"`,
-      `set targetAccount to account \"${accountName.replace(/"/g, '\\"')}\"`,
-      `set targetFolder to mailbox \"${folderName.replace(/"/g, '\\"')}\" of targetAccount`,
-      `set emailList to messages of targetFolder`,
-      `return count of emailList`,
-      `end tell`
-    ];
-    const countArgs = getCountScriptLines.flatMap(line => ['-e', line]);
-    const totalCount = parseInt(await new Promise((resolve, reject) => {
-      execFile('osascript', countArgs, (error, stdout, stderr) => {
-        if (error) resolve('0');
-        else resolve(stdout.trim());
-      });
-    }), 10);
-    // 2. Loop over the last N messages (most recent)
-    const startIdx = Math.max(1, totalCount - emailCount + 1);
-    let matchCount = 0;
-    for (let i = totalCount; i >= startIdx; --i) {
-      // Get date for this email
-      const getDateScriptLines = [
-        `tell application "Mail"`,
-        `set targetAccount to account \"${accountName.replace(/"/g, '\\"')}\"`,
-        `set targetFolder to mailbox \"${folderName.replace(/"/g, '\\"')}\" of targetAccount`,
-        `set emailList to messages of targetFolder`,
-        `set currentEmail to item ${i} of emailList`,
-        `set emailDate to date received of currentEmail`,
-        `set isoDate to (year of emailDate as string) & "-" & text -2 thru -1 of ("0" & (month of emailDate as integer)) & "-" & text -2 thru -1 of ("0" & day of emailDate as integer) & " " & text -2 thru -1 of ("0" & hours of emailDate as integer) & ":" & text -2 thru -1 of ("0" & minutes of emailDate as integer) & ":" & text -2 thru -1 of ("0" & seconds of emailDate as integer)`,
-        `return isoDate`,
-        `end tell`
-      ];
-      const dateArgs = getDateScriptLines.flatMap(line => ['-e', line]);
-      let emailDateStr = '';
-      try {
-        emailDateStr = await new Promise((resolve, reject) => {
-          execFile('osascript', dateArgs, (error, stdout, stderr) => {
-            if (error) resolve('');
-            else resolve(stdout.trim());
-          });
-        });
-      } catch { emailDateStr = ''; }
-      let dateObj = emailDateStr ? new Date(emailDateStr.replace(' ', 'T')) : new Date();
-      const pad = n => n.toString().padStart(2, '0');
-      let timestamp = `${dateObj.getFullYear()}-${pad(dateObj.getMonth()+1)}-${pad(dateObj.getDate())}-${pad(dateObj.getHours())}-${pad(dateObj.getMinutes())}-${pad(dateObj.getSeconds())}`;
-      let baseTimestamp = timestamp;
-      let uniqueTimestamp = baseTimestamp;
-      if (timestampCounts[baseTimestamp] === undefined) {
-        timestampCounts[baseTimestamp] = 1;
-      } else {
-        timestampCounts[baseTimestamp] += 1;
-        uniqueTimestamp = `${baseTimestamp}-${timestampCounts[baseTimestamp]}`;
-      }
-      const emlPath = path.join(outputPath, `${uniqueTimestamp}.eml`);
-      const pdfPath = path.join(outputPath, `${uniqueTimestamp}.pdf`);
-      logDebug(`Exporting EML for email ${i} to ${emlPath}`, outputPath);
-      // Export EML
-      const exportScriptLines = [
-        `tell application "Mail"`,
-        `set exportPath to "${outputPath.replace(/"/g, '\\"')}"`,
-        `set targetAccount to account \"${accountName.replace(/"/g, '\\"')}\"`,
-        `set targetFolder to mailbox \"${folderName.replace(/"/g, '\\"')}\" of targetAccount`,
-        `set emailList to messages of targetFolder`,
-        `set currentEmail to item ${i} of emailList`,
-        `set fileName to "${uniqueTimestamp}.eml"`,
-        `set filePath to exportPath & "/" & fileName`,
-        `set emlSource to source of currentEmail`,
-        `set emlBase64 to do shell script "echo " & quoted form of emlSource & " | base64"`,
-        `do shell script "echo " & quoted form of emlBase64 & " | base64 -D > " & quoted form of filePath`,
-        `end tell`
-      ];
-      const args = exportScriptLines.flatMap(line => ['-e', line]);
-      await new Promise((resolve, reject) => {
-        execFile('osascript', args, (error, stdout, stderr) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
-      logDebug(`Exported EML for email ${i}`, outputPath);
-      // 1. Read EML and extract info for CSV
-      try {
-        const emlContent = await fs.readFile(emlPath, 'utf8');
-        const parsed = await simpleParser(emlContent);
-        const info = extractInfoFromEmail(parsed);
-        clientInfoRows.push(info);
-      } catch (parseErr) {
-        logDebug(`Error parsing EML for CSV: ${parseErr.stack || parseErr}`, outputPath);
-      }
-      // 2. Convert EML to PDF
-      try {
-        await emlToPdfWithPuppeteer(emlPath, pdfPath);
-        await fs.remove(emlPath);
-        pdfFiles.push(path.basename(pdfPath));
-        logDebug(`Converted PDF for email ${i}: ${pdfPath}`, outputPath);
-      } catch (fileError) {
-        // Continue with next email even if one fails
-        logDebug(`Error processing email ${i}: ${fileError.stack || fileError}`, outputPath);
-      }
-      matchCount++;
-      // Send progress update
-      const percent = Math.round((matchCount / emailCount) * 100);
-      event.sender.send('export-progress', {
-        type: 'progress',
-        percent,
-        status: `Exported ${matchCount} of ${emailCount} emails to PDF`
-      });
+    const script = `
+      tell application "Mail"
+        set allMailboxes to {}
+        
+        -- Get local mailboxes (On My Mac) with full paths
+        repeat with currentMailbox in mailboxes
+          if account of currentMailbox is missing value then
+            set mailboxPath to name of currentMailbox
+            set end of allMailboxes to mailboxPath
+            
+            -- Also get submailboxes with full path
+            try
+              repeat with subMailbox in mailboxes of currentMailbox
+                set subMailboxPath to mailboxPath & "/" & name of subMailbox
+                set end of allMailboxes to subMailboxPath
+                
+                -- Get sub-submailboxes (3 levels deep)
+                try
+                  repeat with subSubMailbox in mailboxes of subMailbox
+                    set subSubMailboxPath to subMailboxPath & "/" & name of subSubMailbox
+                    set end of allMailboxes to subSubMailboxPath
+                  end repeat
+                end try
+              end repeat
+            end try
+          end if
+        end repeat
+        
+        return allMailboxes
+      end tell
+    `;
+    
+    const { stdout } = await execAsync(`osascript -e '${script}'`);
+    
+    const folders = stdout.trim()
+      .split(', ')
+      .filter(folder => folder.length > 0)
+      .map(folder => folder.replace(/"/g, ''))
+      .sort();
+    
+    if (folders.length === 0) {
+      throw new Error('No local mailboxes found. Make sure you have "On My Mac" mailboxes set up in Apple Mail.');
     }
-    if (matchCount === 0) {
-      logDebug('No emails found for export.', outputPath);
-      return { success: true, pdfFiles: [] };
-    }
-    if (clientInfoRows.length > 0) {
-      logDebug('Writing client_info.csv', outputPath);
-      const csvWriter = createCsvWriter({
-        path: path.join(outputPath, 'client_info.csv'),
-        header: [
-          {id: 'from', title: 'From'},
-          {id: 'date', title: 'Date'},
-          {id: 'clientName', title: 'ClientName'},
-          {id: 'website', title: 'Website'},
-          {id: 'phone', title: 'Phone'}
-        ]
-      });
-      await csvWriter.writeRecords(clientInfoRows);
-    }
-    logDebug('Export complete', outputPath);
-    return { success: true, pdfFiles };
+    
+    return folders;
+    
   } catch (error) {
-    console.error('Error exporting emails:', error);
+    console.error('Error scanning mail folders:', error);
     throw error;
   }
 });
 
-ipcMain.handle('openPDF', async (event, pdfPath) => {
-  const { shell } = require('electron');
-  await shell.openPath(pdfPath);
+// Function to generate CSV from .eml files
+async function generateCSVFromEmails(emailsFolder, csvFilePath) {
+  try {
+    const files = fs.readdirSync(emailsFolder).filter(file => file.endsWith('.eml'));
+    
+    if (files.length === 0) {
+      console.log('No .eml files found to process');
+      return;
+    }
+    
+    const csvRows = ['From Email,File Name,Subject,Website URL,Sender Name,Company Name,Contact Phone,Timestamp,Content'];
+    
+    for (const fileName of files) {
+      const filePath = path.join(emailsFolder, fileName);
+      const emailContent = fs.readFileSync(filePath, 'utf8');
+      
+      // Parse email content
+      const emailData = await parseEmailContent(emailContent, fileName);
+      
+      // Add to CSV rows
+      csvRows.push([
+        emailData.fromEmail,
+        emailData.fileName,
+        emailData.subject,
+        emailData.websiteUrl,
+        emailData.senderName,
+        emailData.companyName,
+        emailData.contactPhone,
+        emailData.timestamp,
+        emailData.content
+      ].map(field => `"${field.replace(/"/g, '""')}"`).join(','));
+    }
+    
+    // Write CSV file
+    fs.writeFileSync(csvFilePath, csvRows.join('\n'), 'utf8');
+    console.log(`CSV file created with ${files.length} email records`);
+    
+  } catch (error) {
+    console.error('Error generating CSV:', error);
+    throw error;
+  }
+}
+
+// Function to parse email content and extract required data
+async function parseEmailContent(emailContent, fileName) {
+  try {
+    const eml = new EmlParser(Buffer.from(emailContent));
+    const data = await eml.parseEml();
+    
+    // Extract basic email data
+    const fromEmail = data.from?.text || data.from?.value?.[0]?.address || 'Unknown';
+    const fromHeader = data.from?.text || '';
+    const subject = data.subject || '';
+    const emailDate = data.date ? new Date(data.date) : new Date();
+    const timestamp = emailDate.toISOString().replace('T', ' ').substring(0, 19);
+    
+    // Get text body (simple approach like your example)
+    const textBody = data.text || data.htmlAsText || 'No content available';
+    
+    // Clean up content for CSV (convert line breaks to spaces)
+    const content = textBody
+      .replace(/\r\n/g, ' ')
+      .replace(/\r/g, ' ')
+      .replace(/\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    // Extract website URLs from content
+    const urlRegex = /(https?:\/\/[^\s<>"]+|www\.[^\s<>"]+)/gi;
+    const urls = content.match(urlRegex) || [];
+    const websiteUrl = urls.length > 0 ? extractDomain(urls[0]) : '';
+    
+    // Use email-reply-parser for signature extraction
+    const corporateInfo = parseCorporateEmail(textBody, fromHeader);
+    
+    return {
+      fromEmail,
+      fileName,
+      subject,
+      websiteUrl,
+      senderName: corporateInfo.senderName || '',
+      companyName: corporateInfo.company || '',
+      contactPhone: corporateInfo.phone || '',
+      timestamp,
+      content
+    };
+    
+  } catch (error) {
+    console.error('Error parsing email:', error);
+    return {
+      fromEmail: 'Error',
+      fileName,
+      subject: '',
+      websiteUrl: '',
+      senderName: '',
+      companyName: '',
+      contactPhone: '',
+      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      content: 'Error parsing email content'
+    };
+  }
+}
+
+// Helper function to extract domain from URL
+function extractDomain(url) {
+  try {
+    let domain = url;
+    if (url.startsWith('http://')) {
+      domain = url.substring(7);
+    } else if (url.startsWith('https://')) {
+      domain = url.substring(8);
+    } else if (url.startsWith('www.')) {
+      domain = url.substring(4);
+    }
+    
+    // Remove path and query parameters
+    const slashIndex = domain.indexOf('/');
+    if (slashIndex > 0) {
+      domain = domain.substring(0, slashIndex);
+    }
+    
+    return domain;
+  } catch (error) {
+    return '';
+  }
+}
+
+// Superior email parsing functions using email-reply-parser
+function extractSenderName(fromHeader) {
+  // Example: "Jane Doe <jane@acme.com>"
+  const nameMatch = fromHeader.match(/^([^<]+)</);
+  return nameMatch ? nameMatch[1].trim() : fromHeader;
+}
+
+function extractPhone(signatureBlock) {
+  if (!signatureBlock) return null;
+  const phoneMatch = signatureBlock.match(
+    /(\+?\d{1,3}[-.\s]?)?(\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{4}/
+  );
+  return phoneMatch ? phoneMatch[0].trim() : null;
+}
+
+function extractCompanyName(signatureBlock) {
+  if (!signatureBlock) return null;
+  const lines = signatureBlock.trim().split('\n').map(l => l.trim()).filter(Boolean);
+
+  const signoffIndex = lines.findIndex(line =>
+    /^(Regards|Thanks|Best|Sincerely)[\s,]*$/i.test(line)
+  );
+
+  // Assume company name is 2 lines after the sign-off
+  if (signoffIndex !== -1 && lines[signoffIndex + 2]) {
+    return lines[signoffIndex + 2];
+  }
+
+  // Fallback: last non-name line
+  return lines.length > 1 ? lines.slice(-1)[0] : null;
+}
+
+function parseCorporateEmail(rawEmail, fromHeader = null) {
+  try {
+    const parser = new EmailReplyParser();
+    const parsed = parser.read(rawEmail);
+    const fragments = parsed.getFragments();
+    const signature = fragments.filter(f => f.isSignature()).map(f => f.getContent()).join('\n');
+
+    return {
+      senderName: fromHeader ? extractSenderName(fromHeader) : null,
+      phone: extractPhone(signature),
+      company: extractCompanyName(signature)
+    };
+  } catch (error) {
+    console.error('Error parsing corporate email:', error);
+    return {
+      senderName: null,
+      phone: null,
+      company: null
+    };
+  }
+}
+
+
+
+// Handle exporting emails as .eml files using AppleScript
+ipcMain.handle('export-emails', async (event, selectedFolder, outputPath) => {
+  try {
+    // Create emails subfolder in the output directory
+    const emailsFolder = path.join(outputPath, 'emails');
+    if (!fs.existsSync(emailsFolder)) {
+      fs.mkdirSync(emailsFolder, { recursive: true });
+    }
+    
+    // Create CSV file path
+    const csvFilePath = path.join(outputPath, 'contacts.csv');
+    
+    const script = `
+      tell application "Mail"
+        set exportedCount to 0
+        
+        -- Get the selected mailbox
+        set selectedMailbox to missing value
+        
+        -- Parse the folder path to handle nested mailboxes
+        set folderParts to words of "${selectedFolder}"
+        
+        -- Navigate to the mailbox
+        repeat with i from 1 to count of folderParts
+          set folderName to item i of folderParts
+          if i is 1 then
+            set selectedMailbox to mailbox folderName
+          else
+            set selectedMailbox to mailbox folderName of selectedMailbox
+          end if
+        end repeat
+        
+        log "Processing mailbox: ${selectedFolder}"
+        
+        -- Process main mailbox
+        set allMessages to messages of selectedMailbox
+        set messageCount to count of allMessages
+        
+        if messageCount > 0 then
+          log "Found " & messageCount & " messages in ${selectedFolder}"
+          
+          repeat with i from 1 to messageCount
+            set currentMessage to item i of allMessages
+            
+            -- Get message details
+            set messageSender to sender of currentMessage
+            set messageDate to date received of currentMessage
+            set messageSource to source of currentMessage
+            
+            -- Create timestamp for filename
+            set timestamp to do shell script "date +%Y%m%d_%H%M%S"
+            set fileName to "email_" & timestamp & "_" & exportedCount + i & ".eml"
+            set filePath to "${emailsFolder}/" & fileName
+            
+            -- Write raw message source directly to .eml file
+            try
+              do shell script "echo " & quoted form of messageSource & " > " & quoted form of filePath
+              log "Exported: " & fileName
+            on error writeError
+              log "Error writing file: " & writeError
+            end try
+          end repeat
+          
+          set exportedCount to exportedCount + messageCount
+        end if
+        
+        -- Process submailboxes
+        try
+          repeat with subMailbox in mailboxes of selectedMailbox
+            set subMailboxName to name of subMailbox
+            log "Processing submailbox: " & subMailboxName
+            
+            -- Get all messages in this submailbox
+            set subMessages to messages of subMailbox
+            set subMessageCount to count of subMessages
+            
+            if subMessageCount > 0 then
+              log "Found " & subMessageCount & " messages in " & subMailboxName
+              
+              repeat with j from 1 to subMessageCount
+                set currentMessage to item j of subMessages
+                
+                -- Get message details
+                set messageSender to sender of currentMessage
+                set messageDate to date received of currentMessage
+                set messageSource to source of currentMessage
+                
+                -- Create timestamp for filename
+                set timestamp to do shell script "date +%Y%m%d_%H%M%S"
+                set fileName to "email_" & timestamp & "_" & exportedCount + j & ".eml"
+                set filePath to "${emailsFolder}/" & fileName
+                
+                -- Write raw message source directly to .eml file
+                try
+                  do shell script "echo " & quoted form of messageSource & " > " & quoted form of filePath
+                  log "Exported: " & fileName
+                on error writeError
+                  log "Error writing file: " & writeError
+                end try
+              end repeat
+              
+              set exportedCount to exportedCount + subMessageCount
+            end if
+          end repeat
+        end try
+        
+        log "Total exported: " & exportedCount
+        return exportedCount
+      end tell
+    `;
+    
+    const { stdout, stderr } = await execAsync(`osascript -e '${script}'`);
+    
+    if (stderr) {
+      console.log('AppleScript debug output:', stderr);
+    }
+    
+    const exportedCount = parseInt(stdout.trim()) || 0;
+    
+    // Now process the .eml files to generate CSV
+    if (exportedCount > 0) {
+      try {
+        await generateCSVFromEmails(emailsFolder, csvFilePath);
+      } catch (csvError) {
+        console.error('Error generating CSV:', csvError);
+        // Don't fail the entire operation if CSV generation fails
+      }
+    }
+    
+    return {
+      success: true,
+      messageCount: exportedCount,
+      message: `Successfully exported ${exportedCount} emails as .eml files from "${selectedFolder}" and all subfolders to "${emailsFolder}". Contact information saved to "contacts.csv" in the output folder.`
+    };
+    
+  } catch (error) {
+    console.error('Error exporting emails:', error);
+    throw error;
+  }
 });
 
 

@@ -26,8 +26,11 @@
   },
   "dependencies": {
     "csv-writer": "^1.6.0",
+    "email-regex-safe": "^4.0.0",
+    "email-reply-parser": "^2.0.1",
     "eml-parser": "^2.0.4",
     "fs-extra": "^11.1.1",
+    "mailparser": "^3.7.4",
     "path": "^0.12.7",
     "puppeteer": "^24.11.2"
   },
@@ -42,7 +45,10 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ]
     }
