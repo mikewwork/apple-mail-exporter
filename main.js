@@ -114,7 +114,7 @@ async function generateCSVFromEmails(emailsFolder, csvFilePath) {
       return;
     }
     
-    const csvRows = ['From Email,File Name,Subject,Website URL,Sender Name,Company Name,Contact Phone,Timestamp,Content'];
+    const csvRows = ['Date,Sender Email,Subject,Name,Company,Phone,Domain,Filename,Content'];
     
     for (const fileName of files) {
       const filePath = path.join(emailsFolder, fileName);
@@ -125,14 +125,14 @@ async function generateCSVFromEmails(emailsFolder, csvFilePath) {
       
       // Add to CSV rows
       csvRows.push([
+        emailData.timestamp,
         emailData.fromEmail,
-        emailData.fileName,
         emailData.subject,
-        emailData.websiteUrl,
         emailData.senderName,
         emailData.companyName,
         emailData.contactPhone,
-        emailData.timestamp,
+        emailData.websiteUrl,
+        emailData.fileName,
         emailData.content
       ].map(field => `"${field.replace(/"/g, '""')}"`).join(','));
     }
